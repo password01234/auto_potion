@@ -1866,7 +1866,7 @@ private:
         bool is_cas_map = game_data_.is_cas_map.load();
 
         // 1. 角色死亡或离开地图 - 所有治疗都停止
-        if (current_hp <= 500 || !is_valid_map) {
+        if (current_hp <= 1 || !is_valid_map) {
             return false;
         }
 
@@ -1969,14 +1969,13 @@ private:
         bool is_valid_map = game_data_.is_valid_map.load();
         bool is_cas_map = game_data_.is_cas_map.load();
 
-        if (max_hp <= 0 || hp <= 0) return;
 
         int hp_percent = (hp * 100) / max_hp;
         int sp_percent = (sp * 100) / max_sp;
         auto now = std::chrono::steady_clock::now();
 
         // ⭐ 修改后的死亡/离开地图检测逻辑
-        if (hp_percent <= 1) {
+        if (hp <= 1) {
             // 清空所有队列，避免过图后造成断线
             heal_queue_.ClearAllQueues();
             return;
