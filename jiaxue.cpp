@@ -1855,6 +1855,67 @@ private:
         }
         LogMessage("[数据线程] 已停止");
     }
+private:
+    // ⭐ 新增: 统一的出栈检查函数
+    bool ShouldExecuteHeal(const DualHealQueue::HealCommand& command) {
+        int current_hp = game_data_.current_hp.load();
+        int max_hp = game_data_.max_hp.load();
+        int current_sp = game_data_.current_sp.load();
+        int max_sp = game_data_.max_sp.load();
+        bool is_valid_map = game_data_.is_valid_map.load();
+        bool is_cas_map = game_data_.is_cas_map.load();
+
+        // 1. 角色死亡或离开地图 - 所有治疗都停止
+        if (current_hp <= 500 || !is_valid_map) {
+            return false;
+        }
+
+        // 2. 根据治疗类型进行细化检查
+        int hp_percent = (current_hp * 100) / max_hp;
+        int sp_percent = max_sp > 0 ? (current_sp * 100) / max_sp : 100;
+
+        // SP治疗的特殊检查
+        if (command.key_code == sp_heal_.key_code) {
+            return sp_percent <= sp_heal_.threshold && is_valid_map;
+        }
+
+        // 紧急治疗2
+        if (command.key_code == emergency2_heal_.key_code) {
+            return hp_percent <= emergency2_heal_.threshold && is_cas_map;
+        }
+
+        // 紧急治疗1
+        if (command.key_code == emergency1_heal_.key_code) {
+            return hp_percent <= emergency1_heal_.threshold && is_cas_map;
+        }
+
+        // 增强治疗
+        if (command.key_code == enhanced_heal_.key_code) {
+            return hp_percent <= enhanced_heal_.threshold && is_cas_map;
+        }
+
+        // 普通治疗
+        if (command.key_code == normal_heal_.key_code) {
+            return hp_percent <= normal_heal_.threshold && is_valid_map;
+        }
+
+        // 技能触发 (已有冷却检查，这里只检查血量)
+        if (command.key_code == skill_trigger_.key_code) {
+            return hp_percent <= skill_trigger_.threshold && is_cas_map;
+        }
+
+        return true;  // 默认允许
+    }
+    // ⭐ 新增: 统一的计数器减少
+    void DecrementCommandCounter(WORD key_code) {
+        if (key_code == sp_heal_.key_code) {
+            sp_commands_in_queue_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        else if (key_code == normal_heal_.key_code) {
+            normal_hp_commands_in_queue_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        // 可以为其他治疗类型添加计数器
+    }
 
     void HealThread() {
         LogMessage("[治疗线程] 已启动");
@@ -1868,46 +1929,16 @@ private:
             DualHealQueue::HealCommand command;
             if (heal_queue_.Dequeue(command)) {
                 
-                // ⭐ 关键修改：发送按键前再次检查角色状态
-                int current_hp = game_data_.current_hp.load();
-                int max_hp = game_data_.max_hp.load();
-                bool is_valid_map = game_data_.is_valid_map.load();
-
-                // 如果角色死亡或离开有效地图，丢弃这个指令
-                if (current_hp <= 500 || !is_valid_map) {
-                    // ⭐⭐⭐ 正确做法:重置SP计数器为0
-                    if (command.key_code == sp_heal_.key_code) {
-                        sp_commands_in_queue_.store(0);  
-                    }
-                    if (command.key_code == normal_heal_.key_code) {  
-                        normal_hp_commands_in_queue_.store(0);        
-                    }
+                // ⭐⭐⭐ 统一的出栈二次检查逻辑
+                if (!ShouldExecuteHeal(command)) {
+                    // 根据指令类型减少计数器
+                    DecrementCommandCounter(command.key_code);
                     continue;  // 跳过这个按键
-                }
-
-                // SP指令出队时减少计数
-                if (command.key_code == sp_heal_.key_code) {
-                    sp_commands_in_queue_.fetch_sub(1); // 计数-1
-
-                    // 顺便检查一下SP是否还需要恢复
-                    int current_sp = game_data_.current_sp.load();
-                    int max_sp = game_data_.max_sp.load();
-
-                    if (max_sp > 0) {
-                        int sp_percent = (current_sp * 100) / max_sp;
-                        if (sp_percent > sp_heal_.threshold) {
-                            continue; // SP够了，跳过
-                        }
-                    }
-                }
-
-                if (command.key_code == normal_heal_.key_code) {
-                    normal_hp_commands_in_queue_.fetch_sub(1); // 计数-1
                 }
 
                 // 发送按键到目标窗口 (后台模式)
                 SendKeyToTarget(command.key_code);
-
+                DecrementCommandCounter(command.key_code);
                 keys_sent++;
                 // 每50次显示一次日志 (避免刷屏)
                 if (keys_sent % 50 == 0) {
@@ -1945,14 +1976,14 @@ private:
         auto now = std::chrono::steady_clock::now();
 
         // ⭐ 修改后的死亡/离开地图检测逻辑
-        if (hp_percent <= 15) {
+        if (hp_percent <= 1) {
             // 清空所有队列，避免过图后造成断线
             heal_queue_.ClearAllQueues();
             return;
         }
 
 
-        // 检查紧急药品是否可以入队（1秒间隔限制）
+        // 检查紧急药品是否可以入队
         auto canEnqueueEmergency = [&](WORD key_code) -> bool {
             auto it = last_emergency_enqueue_time_.find(key_code);
             if (it == last_emergency_enqueue_time_.end()) {
@@ -1970,28 +2001,24 @@ private:
         // ⭐⭐⭐ 关键修改：紧急治疗2 - 最高优先级，清空普通队列
         if (emergency2_heal_.enabled && hp_percent <= emergency2_heal_.threshold && is_cas_map && hp > 100) {
             if (canEnqueueEmergency(emergency2_heal_.key_code)) {
-                // ⭐ 清空普通队列，确保紧急治疗立即执行
-                heal_queue_.ClearNormalQueue();
-
+       
                 heal_queue_.Enqueue(1, emergency2_heal_.key_code, emergency2_heal_.description, hp, max_hp);
                 last_emergency_enqueue_time_[emergency2_heal_.key_code] = now;
 
-                LogMessage("🚨 紧急治疗2触发！已清空普通队列，立即执行救命！");
-                return;
+                LogMessage("🚨 紧急治疗2触发！，立即执行救命！");
+            
             }
         }
 
         // ⭐⭐⭐ 关键修改：紧急治疗1 - 第二优先级，清空普通队列
         if (emergency1_heal_.enabled && hp_percent <= emergency1_heal_.threshold && is_cas_map && hp > 100) {
             if (canEnqueueEmergency(emergency1_heal_.key_code)) {
-                // ⭐ 清空普通队列，确保紧急治疗优先执行
-                heal_queue_.ClearNormalQueue();
-
+  
                 heal_queue_.Enqueue(2, emergency1_heal_.key_code, emergency1_heal_.description, hp, max_hp);
                 last_emergency_enqueue_time_[emergency1_heal_.key_code] = now;
 
-                LogMessage("⚠️ 紧急治疗1触发！已清空普通队列");
-                return;
+                LogMessage("⚠️ 紧急治疗1触发");
+          
             }
         }
 
