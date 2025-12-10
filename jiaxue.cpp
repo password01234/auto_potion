@@ -1604,11 +1604,11 @@ ConfigurableHealBotUI* g_ui_instance = nullptr;
 class ConfigurableHealBot {
 private:
     // 游戏配置 - 固定内存偏移
-    static constexpr DWORD HP_OFFSET = 0x14EF9DC;
-    static constexpr DWORD MAXHP_OFFSET = 0x14EF9E0;
-    static constexpr DWORD SP_OFFSET = 0x14EF9E4;
-    static constexpr DWORD MAXSP_OFFSET = 0x14EF9E8;
-    static constexpr DWORD MAP_OFFSET = 0x14EBE44;
+    static constexpr DWORD HP_OFFSET = 0x14F3D54;
+    static constexpr DWORD MAXHP_OFFSET = 0x14F3D58;
+    static constexpr DWORD SP_OFFSET = 0x14F3D5C;
+    static constexpr DWORD MAXSP_OFFSET = 0x14F3D60;
+    static constexpr DWORD MAP_OFFSET = 0x14F01BC;
 
     PeriodicAuthVerifier periodic_verifier_;  // ⭐ 后台验证器
 
