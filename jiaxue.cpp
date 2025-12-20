@@ -1517,16 +1517,25 @@ private:
     std::atomic<size_t> total_dequeued_{ 0 };
 
 public:
-    void ClearNormalQueue() {
+    void ClearNormalQueue(std::atomic<int>& normal_hp_counter) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
 
-        // 清空普通队列
+        // 计算要清空的数量
+        size_t cleared_count = normal_queue_.size();
+
         while (!normal_queue_.empty()) {
             normal_queue_.pop();
         }
+
+        // 扣减计数器
+        if (cleared_count > 0) {
+            normal_hp_counter.fetch_sub(static_cast<int>(cleared_count),
+                std::memory_order_relaxed);
+        }
     }
 
-    void ClearAllQueues() {
+    void ClearAllQueues(std::atomic<int>& sp_counter,
+        std::atomic<int>& normal_hp_counter) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
 
         while (!emergency_queue_.empty()) {
@@ -1535,6 +1544,10 @@ public:
         while (!normal_queue_.empty()) {
             normal_queue_.pop();
         }
+
+        // ✅ 重置所有计数器
+        sp_counter.store(0, std::memory_order_relaxed);
+        normal_hp_counter.store(0, std::memory_order_relaxed);
     }
 
     void Enqueue(int priority, WORD key_code, const std::string& description, int current_val, int max_val) {
@@ -1674,7 +1687,7 @@ private:
 
     // 紧急药品1秒间隔
     std::unordered_map<WORD, std::chrono::steady_clock::time_point> last_emergency_enqueue_time_;
-    static constexpr int EMERGENCY_ENQUEUE_INTERVAL_MS = 100; // 紧急药品间隔
+    static constexpr int EMERGENCY_ENQUEUE_INTERVAL_MS = 600; // 紧急药品间隔
 
 public:
     ConfigurableHealBot() : target_window_(nullptr) {
@@ -1867,7 +1880,7 @@ private:
         bool is_cas_map = game_data_.is_cas_map.load();
 
         // 1. 角色死亡或离开地图 - 所有治疗都停止
-        if (current_hp <= 1 || !is_valid_map) {
+        if (current_hp < 1) {
             return false;
         }
 
@@ -1897,6 +1910,9 @@ private:
 
         // 普通治疗
         if (command.key_code == normal_heal_.key_code) {
+
+            bool should_execute = hp_percent <= normal_heal_.threshold && is_valid_map;
+
             return hp_percent <= normal_heal_.threshold && is_valid_map;
         }
 
@@ -1970,18 +1986,15 @@ private:
         bool is_valid_map = game_data_.is_valid_map.load();
         bool is_cas_map = game_data_.is_cas_map.load();
 
-
         int hp_percent = (hp * 100) / max_hp;
         int sp_percent = (sp * 100) / max_sp;
         auto now = std::chrono::steady_clock::now();
 
-        // ⭐ 修改后的死亡/离开地图检测逻辑
-        if (hp <= 1) {
-            // 清空所有队列，避免过图后造成断线
-            heal_queue_.ClearAllQueues();
+        // ⭐⭐⭐ 清空队列的条件：
+        if (hp < 1 || !is_valid_map) {
+            heal_queue_.ClearAllQueues(sp_commands_in_queue_, normal_hp_commands_in_queue_);
             return;
         }
-
 
         // 检查紧急药品是否可以入队
         auto canEnqueueEmergency = [&](WORD key_code) -> bool {
@@ -2031,11 +2044,14 @@ private:
         if (normal_heal_.enabled && hp_percent <= normal_heal_.threshold && is_valid_map) {
             // 只有当队列中普通HP指令少于上限时才入队
             if (normal_hp_commands_in_queue_.load() < MAX_NORMAL_HP_IN_QUEUE) {
+    
+
                 heal_queue_.Enqueue(4, normal_heal_.key_code,
                     normal_heal_.description, hp, max_hp);
                 normal_hp_commands_in_queue_.fetch_add(1); // 计数+1
             }
         }
+
 
         // SP恢复 - 第五优先级，无限制spam
         if (sp_heal_.enabled && sp_percent <= sp_heal_.threshold && is_valid_map) {
